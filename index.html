@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bodega · Gestión de Mercadería</title>
+  <meta name="description" content="Sistema de administración de bodega: control de stock, vencimientos, mermas y cargas masivas." />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>" />
+</head>
+<body>
+  <div class="app">
+    <!-- ===================== SIDEBAR ===================== -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand__logo">📦</span>
+        <div class="brand__text">
+          <strong>Bodega</strong>
+          <small>Gestión de Mercadería</small>
+        </div>
+        <button class="sidebar__close icon-btn" id="btnCloseSidebar" title="Cerrar menú" aria-label="Cerrar menú">✕</button>
+      </div>
+
+      <nav class="nav">
+        <p class="nav__group">Principal</p>
+        <a class="nav__item" data-view="dashboard">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+          <span>Panel de control</span>
+        </a>
+        <a class="nav__item" data-view="ingreso">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+          <span>Ingreso de mercadería</span>
+        </a>
+        <a class="nav__item" data-view="inventario">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/></svg>
+          <span>Inventario / Lotes</span>
+        </a>
+
+        <p class="nav__group">Control de vencimiento</p>
+        <a class="nav__item" data-view="vencimientos">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zm1 11h-2V7h2v6zm0 4h-2v-2h2v2z"/></svg>
+          <span>Vencimientos</span>
+          <span class="nav__badge" id="badgeVenc" hidden></span>
+        </a>
+        <a class="nav__item" data-view="mermas">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+          <span>Mermas</span>
+          <span class="nav__badge" id="badgeMerma" hidden></span>
+        </a>
+
+        <p class="nav__group">Administración</p>
+        <a class="nav__item" data-view="productos">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M12 2l9 4.9V17L12 22l-9-5V6.9L12 2zm0 2.3L5 8v8l7 3.8L19 16V8l-7-3.7z"/></svg>
+          <span>Catálogo de productos</span>
+        </a>
+        <a class="nav__item" data-view="compras">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M3 4h2l3.6 12h9.4l3-9H7M9 20a1 1 0 11-2 0 1 1 0 012 0zm9 0a1 1 0 11-2 0 1 1 0 012 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Compras / Camiones</span>
+        </a>
+        <a class="nav__item" data-view="carga">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+          <span>Carga masiva (Excel)</span>
+        </a>
+        <a class="nav__item" data-view="config">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M19.4 13a7.8 7.8 0 000-2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 00-1.7-1l-.4-2.5h-3.8l-.4 2.5a7.6 7.6 0 00-1.7 1l-2.4-1-2 3.4L4.6 11a7.8 7.8 0 000 2l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 001.7 1l.4 2.5h3.8l.4-2.5a7.6 7.6 0 001.7-1l2.4 1 2-3.4-2-1.6zM12 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7z"/></svg>
+          <span>Configuración</span>
+        </a>
+      </nav>
+
+      <div class="sidebar__footer">
+        <button class="btn btn--ghost btn--block" id="btnBackup">
+          <svg viewBox="0 0 24 24" class="nav__icon"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
+          Respaldar datos
+        </button>
+      </div>
+    </aside>
+
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <!-- ===================== MAIN ===================== -->
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn topbar__menu" id="btnOpenSidebar" title="Menú" aria-label="Abrir menú">☰</button>
+        <div class="topbar__title">
+          <h1 id="pageTitle">Panel de control</h1>
+          <p id="pageSubtitle" class="topbar__subtitle">Resumen general de la bodega</p>
+        </div>
+        <div class="topbar__actions">
+          <div class="search">
+            <svg viewBox="0 0 24 24" class="search__icon"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 10-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 110-9 4.5 4.5 0 010 9z"/></svg>
+            <input type="search" id="globalSearch" placeholder="Buscar producto, marca, lote..." autocomplete="off" />
+          </div>
+          <button class="icon-btn" id="btnTheme" title="Cambiar tema (claro/oscuro)" aria-label="Cambiar tema">
+            <span class="theme-icon theme-icon--sun">☀️</span>
+            <span class="theme-icon theme-icon--moon">🌙</span>
+          </button>
+        </div>
+      </header>
+
+      <main id="view" class="view"><!-- Render dinámico --></main>
+    </div>
+  </div>
+
+  <!-- Modales y notificaciones -->
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root"></div>
+
+  <!-- SheetJS local con respaldo a CDN -->
+  <script src="lib/xlsx.full.min.js"></script>
+  <script>
+    if (!window.XLSX) {
+      var s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+      document.head.appendChild(s);
+    }
+  </script>
+  <script src="js/app.js"></script>
+</body>
+</html>
