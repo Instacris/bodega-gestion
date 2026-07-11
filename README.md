@@ -30,13 +30,20 @@ Algunos navegadores limitan funciones cuando se abre un archivo directamente. Pa
 |---|---|
 | **Panel de control** | Resumen: stock, valor del inventario, vencidos, por vencer, mermas y alertas de stock bajo. |
 | **Ingreso de mercadería** | Registrar llegadas. Permite **varias fechas de vencimiento para el mismo producto** (ver abajo). |
-| **Inventario / Lotes** | Todos los lotes, con filtros por marca/estado y **acciones masivas** (seleccionar, mermar, eliminar, exportar). |
+| **Ventas / Salidas** | Descontar stock al vender. Usa **FEFO**: saca primero los lotes que **vencen antes** (reduce mermas). |
+| **Inventario / Lotes** | Todos los lotes, con filtros por marca/**proveedor**/estado y **acciones masivas** (seleccionar, mermar, eliminar, exportar). |
 | **Vencimientos** | Productos **vencidos** y **por vencer**, con pérdida potencial y umbral configurable. |
 | **Mermas** | Registro de pérdidas y productos **en riesgo de merma** (por vencer). |
-| **Catálogo de productos** | Definir productos, marcas, categorías y **precios de venta**. El stock se calcula solo. |
+| **Catálogo de productos** | Definir productos, marcas, **categorías predefinidas**, **proveedor habitual** y **precios de venta**. El stock se calcula solo. |
 | **Compras / Camiones** | Registro de proveedores, documentos, patente del camión y total por compra. |
 | **Carga masiva (Excel)** | Importar/exportar con planillas `.xlsx` o `.csv`. |
-| **Configuración** | Días de alerta, tema claro/oscuro, respaldos y borrado de datos. |
+| **Configuración** | Días de alerta, tema claro/oscuro, **nombre y color de la bodega**, categorías, respaldos y borrado de datos. |
+
+### 🎨 Personalización
+En **Configuración → Personalización de marca** puedes cambiar el **nombre de la bodega** (aparece en el menú) y el **color de acento** (6 colores). En **Preferencias** editas la lista de **categorías** de productos.
+
+### 📤 Ventas con FEFO
+Al registrar una **venta/salida**, el sistema descuenta primero los lotes que **vencen antes** (First Expired, First Out), nunca lotes vencidos ni mermados. Así rotas la mercadería próxima a vencer y bajas la merma. En el detalle de cada venta ves exactamente de qué lotes salió el stock.
 
 ---
 

@@ -79,11 +79,15 @@
   const STORAGE_KEY = "bodega.state.v1";
   let memoryFallback = null; // si localStorage no está disponible
 
+  const DEFAULT_CATEGORIAS = ["Bebidas", "Lácteos", "Abarrotes", "Limpieza", "Snacks", "Panadería", "Congelados", "Mascotas", "Otros"];
+  const DEFAULT_CONFIG = { diasPorVencer: 30, tema: null, nombreBodega: "Bodega", accent: "teal", categorias: DEFAULT_CATEGORIAS.slice() };
+
   let state = {
     productos: [],
     lotes: [],
     compras: [],
-    config: { diasPorVencer: 30, tema: null },
+    ventas: [],
+    config: Object.assign({}, DEFAULT_CONFIG),
   };
 
   function save() {
@@ -99,8 +103,10 @@
     if (!raw) return false;
     try {
       const data = JSON.parse(raw);
-      state = Object.assign({ productos: [], lotes: [], compras: [], config: {} }, data);
-      state.config = Object.assign({ diasPorVencer: 30, tema: null }, state.config || {});
+      state = Object.assign({ productos: [], lotes: [], compras: [], ventas: [], config: {} }, data);
+      if (!Array.isArray(state.ventas)) state.ventas = [];
+      state.config = Object.assign({}, DEFAULT_CONFIG, state.config || {});
+      if (!Array.isArray(state.config.categorias) || !state.config.categorias.length) state.config.categorias = DEFAULT_CATEGORIAS.slice();
       return true;
     } catch (e) { return false; }
   }
@@ -180,6 +186,11 @@
       else if (e === "por_vencer") { porVencer++; uPorVencer += c; vPorVencer += c * pv; vendibles += c; valorVenta += c * pv; valorCosto += c * pc; }
       else { vendibles += c; valorVenta += c * pv; valorCosto += c * pc; }
     }
+    let uVendidas = 0, montoVendido = 0;
+    for (const v of state.ventas) {
+      montoVendido += Number(v.total) || 0;
+      (v.items || []).forEach((it) => { uVendidas += Number(it.cantidad) || 0; });
+    }
     return {
       productos: state.productos.length,
       vendibles, valorVenta, valorCosto,
@@ -187,10 +198,46 @@
       porVencer, uPorVencer, vPorVencer,
       mermados, uMermados, perdidaMerma,
       compras: state.compras.length,
+      ventas: state.ventas.length, uVendidas, montoVendido,
     };
   }
 
   const marcasUnicas = () => [...new Set(state.productos.map((p) => p.marca).filter(Boolean))].sort();
+
+  function proveedoresUnicos() {
+    const set = new Set();
+    state.compras.forEach((c) => c.proveedor && set.add(c.proveedor));
+    state.lotes.forEach((l) => l.proveedor && set.add(l.proveedor));
+    state.productos.forEach((p) => p.proveedorHabitual && set.add(p.proveedorHabitual));
+    return [...set].sort();
+  }
+  function categoriasDisponibles() {
+    const set = new Set(state.config.categorias || []);
+    state.productos.forEach((p) => p.categoria && set.add(p.categoria));
+    return [...set];
+  }
+
+  // Descuenta 'cantidad' de un producto usando FEFO (vence antes → sale primero).
+  // Salta lotes mermados y vencidos. Devuelve los lotes usados y lo que faltó.
+  function descontarFEFO(productoId, cantidad) {
+    const lotes = lotesDeProducto(productoId)
+      .filter((l) => !l.mermado && estadoLote(l) !== "vencido" && Number(l.cantidad) > 0)
+      .sort((a, b) => (parseFecha(a.fechaVencimiento) || Infinity) - (parseFecha(b.fechaVencimiento) || Infinity));
+    let restante = cantidad;
+    const usados = [];
+    for (const l of lotes) {
+      if (restante <= 0) break;
+      const take = Math.min(restante, Number(l.cantidad));
+      l.cantidad = Number(l.cantidad) - take;
+      usados.push({ loteId: l.id, cantidad: take, fechaVencimiento: l.fechaVencimiento });
+      restante -= take;
+    }
+    return { usados, restante };
+  }
+  // Elimina lotes vacíos (cantidad 0) que no sean mermas (las mermas se conservan como registro).
+  function limpiarLotesVacios() {
+    state.lotes = state.lotes.filter((l) => Number(l.cantidad) > 0 || l.mermado);
+  }
 
   /* ---------------------------------------------------------
      4) NOTIFICACIONES Y MODALES
@@ -231,6 +278,7 @@
   const VIEWS = {
     dashboard:   { title: "Panel de control",        subtitle: "Resumen general de la bodega",            render: renderDashboard },
     ingreso:     { title: "Ingreso de mercadería",   subtitle: "Registra llegadas con sus vencimientos",  render: renderIngreso },
+    ventas:      { title: "Ventas / Salidas",        subtitle: "Descuenta stock con criterio FEFO",       render: renderVentas },
     inventario:  { title: "Inventario / Lotes",      subtitle: "Todos los lotes en bodega",               render: renderInventario },
     vencimientos:{ title: "Control de vencimientos", subtitle: "Productos vencidos y por vencer",         render: renderVencimientos },
     mermas:      { title: "Mermas",                  subtitle: "Pérdidas y productos en riesgo",          render: renderMermas },
@@ -289,6 +337,7 @@
       .slice(0, 6);
 
     const ultimasCompras = [...state.compras].sort((a, b) => parseFecha(b.fecha) - parseFecha(a.fecha)).slice(0, 5);
+    const ultimasVentas = [...state.ventas].sort((a, b) => (parseFecha(b.fecha) || 0) - (parseFecha(a.fecha) || 0)).slice(0, 5);
 
     view.innerHTML = `
       <div class="kpi-grid">
@@ -298,6 +347,7 @@
         ${kpi("Vencidos", num(m.vencidos), `${num(m.uVencidos)} u · ${money(m.vVencidos)}`, "⛔", "danger", "vencimientos")}
         ${kpi("Por vencer", num(m.porVencer), `≤ ${state.config.diasPorVencer} días · ${num(m.uPorVencer)} u`, "⏳", "warn", "vencimientos")}
         ${kpi("Mermados", num(m.mermados), `${num(m.uMermados)} u · −${money(m.perdidaMerma)}`, "🔻", "merma", "mermas")}
+        ${kpi("Ventas / salidas", num(m.ventas), `${num(m.uVendidas)} u · ${money(m.montoVendido)}`, "🧾", "primary", "ventas")}
       </div>
 
       <div class="dash-grid">
@@ -360,6 +410,24 @@
                 </li>`;
               }).join("")}</ul>`
                 : `<p class="text-muted" style="padding:6px 0">Aún no registras compras o camiones.</p>`}
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card__head"><h3>Últimas ventas</h3><button class="btn btn--ghost btn--sm" data-goto="ventas">Ver todo</button></div>
+            <div class="card__body">
+              ${ultimasVentas.length ? `<ul class="list-clean">${ultimasVentas.map((v) => {
+                const u = (v.items || []).reduce((s, it) => s + (Number(it.cantidad) || 0), 0);
+                return `<li class="mini-list-item">
+                  <span class="mini-list-item__dot" style="background:var(--primary)"></span>
+                  <div class="mini-list-item__body">
+                    <div class="mini-list-item__title">${escapeHtml(v.documento || "Venta directa")}</div>
+                    <div class="mini-list-item__sub">${fmtFecha(v.fecha)} · ${num(u)} u</div>
+                  </div>
+                  <span class="tag-stock">${money(v.total)}</span>
+                </li>`;
+              }).join("")}</ul>`
+                : `<p class="text-muted" style="padding:6px 0">Aún no registras ventas o salidas.</p>`}
             </div>
           </div>
         </div>
@@ -548,7 +616,7 @@
       if (!prod) {
         prod = {
           id: uid("p"), nombre: row.nombre, marca: row.marca, categoria: "", descripcion: "",
-          unidad: "Unidad", codigoBarras: "", precioVenta: 0, stockMinimo: 0, creado: new Date().toISOString(),
+          unidad: "Unidad", proveedorHabitual: proveedorTxt || "", codigoBarras: "", precioVenta: 0, stockMinimo: 0, creado: new Date().toISOString(),
         };
         state.productos.push(prod);
         nuevosProductos++;
@@ -570,9 +638,214 @@
   }
 
   /* ---------------------------------------------------------
+     7b) VISTA: VENTAS / SALIDAS  (descuento FEFO)
+  --------------------------------------------------------- */
+  function renderVentas() {
+    const m = metrics();
+    const ventas = [...state.ventas].sort((a, b) => (parseFecha(b.fecha) || 0) - (parseFecha(a.fecha) || 0));
+    view.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi"><div class="kpi__top"><span class="kpi__label">Ventas registradas</span><span class="kpi__icon kpi__icon--primary">🧾</span></div><div class="kpi__value">${num(m.ventas)}</div><div class="kpi__hint">salidas de stock</div></div>
+        <div class="kpi"><div class="kpi__top"><span class="kpi__label">Unidades vendidas</span><span class="kpi__icon kpi__icon--info">📤</span></div><div class="kpi__value">${num(m.uVendidas)}</div><div class="kpi__hint">total histórico</div></div>
+        <div class="kpi"><div class="kpi__top"><span class="kpi__label">Monto vendido</span><span class="kpi__icon kpi__icon--ok">💰</span></div><div class="kpi__value">${money(m.montoVendido)}</div><div class="kpi__hint">valor de venta</div></div>
+      </div>
+
+      <div class="card" style="margin-bottom:18px">
+        <div class="card__body">
+          <p style="margin-bottom:4px"><strong>📤 Salida de stock con FEFO</strong> (First Expired, First Out)</p>
+          <p class="text-muted">Al registrar una venta, el sistema descuenta primero los lotes que <strong>vencen antes</strong>. Así rotas la mercadería próxima a vencer y reduces mermas automáticamente. No se venden lotes vencidos ni mermados.</p>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <div><h2>Historial de ventas / salidas</h2></div>
+        <button class="btn btn--primary" id="btnNuevaVenta">➕ Registrar venta / salida</button>
+      </div>
+
+      <div class="card"><div class="table-wrap">
+        ${ventas.length ? `
+        <table class="data">
+          <thead><tr><th>Fecha</th><th>Documento / Cliente</th><th class="num">Ítems</th><th class="num">Unidades</th><th class="num">Total</th><th></th></tr></thead>
+          <tbody>${ventas.map((v) => {
+            const u = (v.items || []).reduce((s, it) => s + (Number(it.cantidad) || 0), 0);
+            return `<tr>
+              <td>${fmtFecha(v.fecha)}</td>
+              <td class="cell-main">${escapeHtml(v.documento || "Venta directa")}</td>
+              <td class="num">${(v.items || []).length}</td>
+              <td class="num">${num(u)}</td>
+              <td class="num">${money(v.total)}</td>
+              <td><div class="flex gap-8">
+                <button class="btn btn--ghost btn--sm" data-verventa="${v.id}" title="Ver detalle">👁️</button>
+                <button class="btn btn--ghost btn--sm" data-delventa="${v.id}" title="Eliminar registro">🗑️</button>
+              </div></td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table>` : emptyBlock("🧾", "Sin ventas registradas", "Registra la primera salida de stock. Se descontará por vencimiento (FEFO).",
+          `<button class="btn btn--primary" id="btnNuevaVenta2">➕ Registrar venta / salida</button>`)}
+      </div></div>`;
+
+    const b1 = $("#btnNuevaVenta"); if (b1) b1.addEventListener("click", modalVenta);
+    const b2 = $("#btnNuevaVenta2"); if (b2) b2.addEventListener("click", modalVenta);
+    $$("[data-verventa]").forEach((b) => b.addEventListener("click", () => modalDetalleVenta(b.dataset.verventa)));
+    $$("[data-delventa]").forEach((b) => b.addEventListener("click", () => {
+      confirmDialog("¿Eliminar este registro de venta? El stock ya descontado <strong>no</strong> se repone.", () => {
+        state.ventas = state.ventas.filter((v) => v.id !== b.dataset.delventa);
+        save(); toast("Registro de venta eliminado.", "success"); renderVentas();
+      }, { danger: true, confirmLabel: "Eliminar" });
+    }));
+  }
+
+  function ventaLineHTML() {
+    const opts = state.productos
+      .map((p) => ({ p, st: stockVendible(p.id) }))
+      .filter((x) => x.st > 0)
+      .sort((a, b) => a.p.nombre.localeCompare(b.p.nombre))
+      .map((x) => `<option value="${x.p.id}" data-precio="${x.p.precioVenta || 0}" data-stock="${x.st}">${escapeHtml(x.p.nombre)}${x.p.marca ? " · " + escapeHtml(x.p.marca) : ""} (stock ${num(x.st)})</option>`)
+      .join("");
+    return `<div class="lote-line venta-line">
+      <div class="field"><label>Producto <span class="req">*</span></label>
+        <select class="select vl-prod"><option value="">Seleccionar…</option>${opts}</select></div>
+      <div class="field"><label>Cantidad <span class="req">*</span></label>
+        <input type="number" min="1" step="1" class="input vl-cant" placeholder="0"></div>
+      <div class="field"><label>Precio venta (unit.)</label>
+        <input type="number" min="0" step="1" class="input vl-precio" placeholder="0"></div>
+      <div class="field"><label>Disponible</label>
+        <input class="input vl-stock" disabled value="—"></div>
+      <div class="flex gap-8" style="padding-bottom:2px">
+        <button class="lote-line__del" data-del-vline title="Quitar">✕</button>
+      </div>
+    </div>`;
+  }
+
+  function modalVenta() {
+    if (!state.productos.some((p) => stockVendible(p.id) > 0)) {
+      toast("No hay stock disponible para vender. Ingresa mercadería primero.", "warn");
+      return;
+    }
+    openModal(`
+      <div class="modal__head"><h3>Registrar venta / salida</h3><button class="icon-btn" data-close>✕</button></div>
+      <div class="modal__body">
+        <div class="form-grid">
+          <div class="field"><label>Fecha</label><input type="date" class="input" id="vFecha" value="${addDays(0)}"></div>
+          <div class="field"><label>Documento / Cliente</label><input class="input" id="vDoc" placeholder="Ej: Boleta 1234 / Cliente"></div>
+        </div>
+        <hr class="divider">
+        <div class="lote-lines" id="ventaLines">${ventaLineHTML()}</div>
+        <button class="btn btn--soft btn--sm mt-16" id="btnAddVLine">➕ Agregar producto</button>
+      </div>
+      <div class="modal__foot">
+        <div style="margin-right:auto;font-weight:700" id="vTotal">Total: ${money(0)}</div>
+        <button class="btn btn--ghost" data-close>Cancelar</button>
+        <button class="btn btn--primary" id="vOk">✔ Confirmar salida</button>
+      </div>`, { wide: true });
+
+    const cont = $("#ventaLines");
+    const recalc = () => {
+      let total = 0;
+      $$(".venta-line", cont).forEach((l) => {
+        total += (Number($(".vl-cant", l).value) || 0) * (Number($(".vl-precio", l).value) || 0);
+      });
+      $("#vTotal").textContent = "Total: " + money(total);
+    };
+    cont.addEventListener("change", (e) => {
+      if (e.target.classList.contains("vl-prod")) {
+        const line = e.target.closest(".venta-line");
+        const opt = e.target.selectedOptions[0];
+        const precio = opt ? opt.dataset.precio : "";
+        const stock = opt ? opt.dataset.stock : "";
+        if (precio && !$(".vl-precio", line).value) $(".vl-precio", line).value = precio;
+        $(".vl-stock", line).value = stock ? num(stock) : "—";
+        $(".vl-cant", line).max = stock || "";
+      }
+      recalc();
+    });
+    cont.addEventListener("input", recalc);
+    cont.addEventListener("click", (e) => {
+      const del = e.target.closest("[data-del-vline]");
+      if (del && $$(".venta-line", cont).length > 1) { del.closest(".venta-line").remove(); recalc(); }
+    });
+    $("#btnAddVLine").addEventListener("click", () => { cont.insertAdjacentHTML("beforeend", ventaLineHTML()); });
+    $("#vOk").addEventListener("click", guardarVenta);
+  }
+
+  function guardarVenta() {
+    const fecha = $("#vFecha").value || addDays(0);
+    const doc = $("#vDoc").value.trim();
+    const lines = $$("#ventaLines .venta-line");
+    const items = [];
+    let invalid = false;
+
+    // valida y agrega (sin descontar todavía)
+    const pedido = {};
+    lines.forEach((line) => {
+      const sel = $(".vl-prod", line);
+      const pid = sel.value;
+      const cantInput = $(".vl-cant", line);
+      const cant = Number(cantInput.value);
+      sel.classList.remove("input--invalid"); cantInput.classList.remove("input--invalid");
+      if (!pid && !cantInput.value) return;
+      if (!pid) { sel.classList.add("input--invalid"); invalid = true; return; }
+      if (!(cant > 0)) { cantInput.classList.add("input--invalid"); invalid = true; return; }
+      pedido[pid] = (pedido[pid] || 0) + cant;
+      items.push({ productoId: pid, cantidad: cant, precioVenta: Number($(".vl-precio", line).value) || 0 });
+    });
+
+    if (invalid) { toast("Revisa los productos marcados.", "error"); return; }
+    if (!items.length) { toast("Agrega al menos un producto.", "warn"); return; }
+
+    // valida stock por producto (sumando líneas repetidas)
+    for (const pid in pedido) {
+      if (pedido[pid] > stockVendible(pid)) {
+        const p = getProducto(pid) || {};
+        toast(`Stock insuficiente de "${p.nombre}". Disponible: ${num(stockVendible(pid))}.`, "error");
+        return;
+      }
+    }
+
+    // descuenta FEFO
+    let total = 0;
+    items.forEach((it) => {
+      const { usados } = descontarFEFO(it.productoId, it.cantidad);
+      it.usados = usados;
+      it.nombre = (getProducto(it.productoId) || {}).nombre || "";
+      total += it.cantidad * it.precioVenta;
+    });
+    limpiarLotesVacios();
+
+    state.ventas.push({ id: uid("v"), fecha, documento: doc, items, total, creado: new Date().toISOString() });
+    save(); closeModal();
+    toast(`Venta registrada: ${items.length} producto(s), ${money(total)}. Stock descontado por FEFO.`, "success");
+    renderVentas(); refreshBadges();
+  }
+
+  function modalDetalleVenta(id) {
+    const v = state.ventas.find((x) => x.id === id); if (!v) return;
+    openModal(`
+      <div class="modal__head"><h3>Detalle de venta</h3><button class="icon-btn" data-close>✕</button></div>
+      <div class="modal__body">
+        <div class="form-grid" style="margin-bottom:10px">
+          <div><div class="cell-sub">Fecha</div><div class="cell-main">${fmtFecha(v.fecha)}</div></div>
+          <div><div class="cell-sub">Documento / Cliente</div><div class="cell-main">${escapeHtml(v.documento || "Venta directa")}</div></div>
+          <div><div class="cell-sub">Total</div><div class="cell-main">${money(v.total)}</div></div>
+        </div>
+        <hr class="divider">
+        <table class="data"><thead><tr><th>Producto</th><th class="num">Cant.</th><th class="num">P. venta</th><th class="num">Subtotal</th><th>Lotes usados (FEFO)</th></tr></thead>
+          <tbody>${(v.items || []).map((it) => `<tr>
+            <td class="cell-main">${escapeHtml(it.nombre || "—")}</td>
+            <td class="num">${num(it.cantidad)}</td>
+            <td class="num">${money(it.precioVenta)}</td>
+            <td class="num">${money((Number(it.cantidad) || 0) * (Number(it.precioVenta) || 0))}</td>
+            <td class="cell-sub">${(it.usados || []).map((u) => `#${String(u.loteId).slice(-5)} (${num(u.cantidad)}${u.fechaVencimiento ? " · vence " + fmtFecha(u.fechaVencimiento) : ""})`).join("<br>") || "—"}</td>
+          </tr>`).join("")}</tbody>
+        </table>
+      </div>
+      <div class="modal__foot"><button class="btn btn--ghost" data-close>Cerrar</button></div>`, { wide: true });
+  }
+
+  /* ---------------------------------------------------------
      8) VISTA: INVENTARIO / LOTES
   --------------------------------------------------------- */
-  let invFilters = { q: "", marca: "", estado: "", sort: "venc_asc" };
+  let invFilters = { q: "", marca: "", estado: "", proveedor: "", sort: "venc_asc" };
   let selectedLotes = new Set();
 
   function lotesFiltrados() {
@@ -585,6 +858,7 @@
       x.l.id.toLowerCase().includes(q));
     if (invFilters.marca) arr = arr.filter((x) => (x.p.marca || "") === invFilters.marca);
     if (invFilters.estado) arr = arr.filter((x) => x.e === invFilters.estado);
+    if (invFilters.proveedor) arr = arr.filter((x) => (x.l.proveedor || (x.p.proveedorHabitual || "")) === invFilters.proveedor);
     const sorters = {
       venc_asc: (a, b) => (parseFecha(a.l.fechaVencimiento) || Infinity) - (parseFecha(b.l.fechaVencimiento) || Infinity),
       venc_desc: (a, b) => (parseFecha(b.l.fechaVencimiento) || -Infinity) - (parseFecha(a.l.fechaVencimiento) || -Infinity),
@@ -598,6 +872,7 @@
   function renderInventario() {
     const marcaOpts = marcasUnicas().map((mk) => `<option value="${escapeHtml(mk)}" ${invFilters.marca === mk ? "selected" : ""}>${escapeHtml(mk)}</option>`).join("");
     const estadoOpts = Object.entries(ESTADOS).map(([k, v]) => `<option value="${k}" ${invFilters.estado === k ? "selected" : ""}>${v.label}</option>`).join("");
+    const provOpts = proveedoresUnicos().map((pv) => `<option value="${escapeHtml(pv)}" ${invFilters.proveedor === pv ? "selected" : ""}>${escapeHtml(pv)}</option>`).join("");
 
     view.innerHTML = `
       <div class="section-head">
@@ -614,6 +889,7 @@
           <input type="search" id="invSearch" placeholder="Buscar producto, marca, lote…" value="${escapeHtml(invFilters.q)}" style="width:100%">
         </div>
         <select class="select" id="invMarca"><option value="">Todas las marcas</option>${marcaOpts}</select>
+        <select class="select" id="invProv"><option value="">Todos los proveedores</option>${provOpts}</select>
         <select class="select" id="invEstado"><option value="">Todos los estados</option>${estadoOpts}</select>
         <select class="select" id="invSort">
           <option value="venc_asc" ${invFilters.sort === "venc_asc" ? "selected" : ""}>Vence primero</option>
@@ -621,7 +897,7 @@
           <option value="nombre" ${invFilters.sort === "nombre" ? "selected" : ""}>Nombre A–Z</option>
           <option value="cant_desc" ${invFilters.sort === "cant_desc" ? "selected" : ""}>Mayor cantidad</option>
         </select>
-        ${invFilters.q || invFilters.marca || invFilters.estado ? `<button class="btn btn--ghost btn--sm" id="invClear">✕ Limpiar filtros</button>` : ""}
+        ${invFilters.q || invFilters.marca || invFilters.estado || invFilters.proveedor ? `<button class="btn btn--ghost btn--sm" id="invClear">✕ Limpiar filtros</button>` : ""}
       </div>
 
       <div id="bulkBar"></div>
@@ -629,9 +905,10 @@
 
     $("#invSearch").addEventListener("input", (e) => { invFilters.q = e.target.value; renderInvTable(); });
     $("#invMarca").addEventListener("change", (e) => { invFilters.marca = e.target.value; renderInvTable(); });
+    $("#invProv").addEventListener("change", (e) => { invFilters.proveedor = e.target.value; renderInvTable(); });
     $("#invEstado").addEventListener("change", (e) => { invFilters.estado = e.target.value; renderInvTable(); });
     $("#invSort").addEventListener("change", (e) => { invFilters.sort = e.target.value; renderInvTable(); });
-    const clr = $("#invClear"); if (clr) clr.addEventListener("click", () => { invFilters = { q: "", marca: "", estado: "", sort: invFilters.sort }; renderInventario(); });
+    const clr = $("#invClear"); if (clr) clr.addEventListener("click", () => { invFilters = { q: "", marca: "", estado: "", proveedor: "", sort: invFilters.sort }; renderInventario(); });
 
     renderInvTable();
   }
@@ -965,7 +1242,7 @@
             return `<tr>
               <td><div class="cell-main">${escapeHtml(p.nombre)}</div><div class="cell-sub">${escapeHtml(p.unidad || "Unidad")}${p.codigoBarras ? " · " + escapeHtml(p.codigoBarras) : ""}</div></td>
               <td>${escapeHtml(p.marca || "—")}</td>
-              <td>${escapeHtml(p.categoria || "—")}</td>
+              <td>${escapeHtml(p.categoria || "—")}${p.proveedorHabitual ? `<div class="cell-sub">🚚 ${escapeHtml(p.proveedorHabitual)}</div>` : ""}</td>
               <td class="num">${money(p.precioVenta)}</td>
               <td class="num"><span class="tag-stock ${bajo ? "text-warn" : ""}">${num(st)}</span></td>
               <td class="num muted">${p.stockMinimo ? num(p.stockMinimo) : "—"}</td>
@@ -985,7 +1262,7 @@
     const b1 = $("#btnNuevoProd"); if (b1) b1.addEventListener("click", () => modalProducto());
     const b2 = $("#btnNuevoProd2"); if (b2) b2.addEventListener("click", () => modalProducto());
     $$("[data-edit]").forEach((b) => b.addEventListener("click", () => modalProducto(b.dataset.edit)));
-    $$("[data-vlotes]").forEach((b) => b.addEventListener("click", () => { invFilters = { q: getProducto(b.dataset.vlotes).nombre, marca: "", estado: "", sort: "venc_asc" }; navigate("inventario"); }));
+    $$("[data-vlotes]").forEach((b) => b.addEventListener("click", () => { invFilters = { q: getProducto(b.dataset.vlotes).nombre, marca: "", estado: "", proveedor: "", sort: "venc_asc" }; navigate("inventario"); }));
     $$("[data-del]").forEach((b) => b.addEventListener("click", () => {
       const p = getProducto(b.dataset.del); const n = lotesDeProducto(p.id).length;
       confirmDialog(`¿Eliminar <strong>${escapeHtml(p.nombre)}</strong>?${n ? ` Se eliminarán también sus <strong>${n}</strong> lote(s).` : ""}`, () => {
@@ -999,20 +1276,25 @@
   function modalProducto(id) {
     const p = id ? getProducto(id) : null;
     const unidades = ["Unidad", "Caja", "Pack", "Kilogramo", "Litro", "Bolsa", "Botella", "Display"];
+    const cats = categoriasDisponibles();
+    if (p && p.categoria && !cats.includes(p.categoria)) cats.push(p.categoria);
+    const catOpts = `<option value="">— Sin categoría —</option>` + cats.map((c) => `<option ${p && p.categoria === c ? "selected" : ""}>${escapeHtml(c)}</option>`).join("");
     openModal(`
       <div class="modal__head"><h3>${p ? "Editar producto" : "Nuevo producto"}</h3><button class="icon-btn" data-close>✕</button></div>
       <div class="modal__body">
         <div class="field"><label>Nombre <span class="req">*</span></label><input class="input" id="pNombre" value="${escapeHtml(p?.nombre || "")}" placeholder="Ej: Coca Cola 1.5L"></div>
         <div class="form-grid">
           <div class="field"><label>Marca</label><input class="input" id="pMarca" list="dlMarcas2" value="${escapeHtml(p?.marca || "")}" placeholder="Ej: Coca-Cola"></div>
-          <div class="field"><label>Categoría</label><input class="input" id="pCat" value="${escapeHtml(p?.categoria || "")}" placeholder="Ej: Bebidas"></div>
+          <div class="field"><label>Categoría</label><select class="select" id="pCat">${catOpts}</select></div>
           <div class="field"><label>Unidad</label><select class="select" id="pUnidad">${unidades.map((u) => `<option ${p?.unidad === u ? "selected" : ""}>${u}</option>`).join("")}</select></div>
+          <div class="field"><label>Proveedor habitual</label><input class="input" id="pProv" list="dlProv2" value="${escapeHtml(p?.proveedorHabitual || "")}" placeholder="Ej: Distribuidora Andina"></div>
           <div class="field"><label>Código de barras</label><input class="input" id="pCodigo" value="${escapeHtml(p?.codigoBarras || "")}" placeholder="Opcional"></div>
           <div class="field"><label>Precio de venta</label><input type="number" min="0" class="input" id="pVenta" value="${escapeHtml(p?.precioVenta || 0)}"></div>
           <div class="field"><label>Stock mínimo</label><input type="number" min="0" class="input" id="pMin" value="${escapeHtml(p?.stockMinimo || 0)}"></div>
         </div>
         <div class="field"><label>Descripción</label><textarea class="textarea" id="pDesc" placeholder="Detalle del producto…">${escapeHtml(p?.descripcion || "")}</textarea></div>
         <datalist id="dlMarcas2">${marcasUnicas().map((mk) => `<option value="${escapeHtml(mk)}"></option>`).join("")}</datalist>
+        <datalist id="dlProv2">${proveedoresUnicos().map((pv) => `<option value="${escapeHtml(pv)}"></option>`).join("")}</datalist>
       </div>
       <div class="modal__foot"><button class="btn btn--ghost" data-close>Cancelar</button><button class="btn btn--primary" id="pOk">${p ? "Guardar" : "Crear producto"}</button></div>`);
     $("#pOk").addEventListener("click", () => {
@@ -1020,7 +1302,7 @@
       if (!nombre) { $("#pNombre").classList.add("input--invalid"); toast("El nombre es obligatorio.", "error"); return; }
       const data = {
         nombre, marca: $("#pMarca").value.trim(), categoria: $("#pCat").value.trim(),
-        unidad: $("#pUnidad").value, codigoBarras: $("#pCodigo").value.trim(),
+        unidad: $("#pUnidad").value, proveedorHabitual: $("#pProv").value.trim(), codigoBarras: $("#pCodigo").value.trim(),
         precioVenta: Number($("#pVenta").value) || 0, stockMinimo: Number($("#pMin").value) || 0,
         descripcion: $("#pDesc").value.trim(),
       };
@@ -1320,7 +1602,7 @@
       let prod = state.productos.find((p) => p.nombre.toLowerCase() === f.nombre.toLowerCase() && (p.marca || "").toLowerCase() === f.marca.toLowerCase())
         || state.productos.find((p) => p.nombre.toLowerCase() === f.nombre.toLowerCase());
       if (!prod) {
-        prod = { id: uid("p"), nombre: f.nombre, marca: f.marca, categoria: f.categoria, descripcion: f.descripcion, unidad: f.unidad, codigoBarras: f.codigoBarras, precioVenta: f.precioVenta, stockMinimo: 0, creado: new Date().toISOString() };
+        prod = { id: uid("p"), nombre: f.nombre, marca: f.marca, categoria: f.categoria, descripcion: f.descripcion, unidad: f.unidad, proveedorHabitual: f.proveedor || "", codigoBarras: f.codigoBarras, precioVenta: f.precioVenta, stockMinimo: 0, creado: new Date().toISOString() };
         state.productos.push(prod); nuevosProd++;
       } else if (f.precioVenta && !prod.precioVenta) { prod.precioVenta = f.precioVenta; }
 
@@ -1404,6 +1686,25 @@
   function renderConfig() {
     const m = metrics();
     view.innerHTML = `
+      <div class="card" style="margin-bottom:18px">
+        <div class="card__head"><h3>Personalización de marca</h3></div>
+        <div class="card__body">
+          <div class="form-grid">
+            <div class="field">
+              <label>Nombre de la bodega</label>
+              <input class="input" id="cfgNombre" maxlength="28" value="${escapeHtml(state.config.nombreBodega || "Bodega")}">
+              <span class="field-hint">Aparece en el menú lateral.</span>
+            </div>
+          </div>
+          <div class="field mb-0">
+            <label>Color de acento</label>
+            <div class="swatches">
+              ${ACCENTS.map((a) => `<div class="swatch ${(state.config.accent || "teal") === a.id ? "active" : ""}" data-accent-swatch="${a.id}" title="${a.nombre}" style="background:${a.color}"></div>`).join("")}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="dash-grid">
         <div class="card">
           <div class="card__head"><h3>Preferencias</h3></div>
@@ -1415,6 +1716,12 @@
             </div>
             <hr class="divider">
             <div class="field">
+              <label>Categorías de productos (separadas por coma)</label>
+              <textarea class="textarea" id="cfgCategorias" style="min-height:60px">${escapeHtml((state.config.categorias || []).join(", "))}</textarea>
+              <span class="field-hint">Se ofrecen al crear o editar un producto.</span>
+            </div>
+            <hr class="divider">
+            <div class="field mb-0">
               <label>Tema de la interfaz</label>
               <div class="row-actions">
                 <button class="chip-toggle" data-tema="light">☀️ Claro</button>
@@ -1445,6 +1752,13 @@
 
     $("#cfgDias").addEventListener("change", (e) => { state.config.diasPorVencer = Math.max(1, Number(e.target.value) || 30); save(); toast("Umbral actualizado.", "success"); refreshBadges(); });
     $$("[data-tema]").forEach((b) => { b.classList.toggle("active", currentTheme() === b.dataset.tema); b.addEventListener("click", () => setTheme(b.dataset.tema)); });
+    $("#cfgNombre").addEventListener("input", (e) => { state.config.nombreBodega = e.target.value.trim() || "Bodega"; save(); applyBranding(); });
+    $$("[data-accent-swatch]").forEach((s) => s.addEventListener("click", () => setAccent(s.dataset.accentSwatch)));
+    $("#cfgCategorias").addEventListener("change", (e) => {
+      const cats = e.target.value.split(",").map((c) => c.trim()).filter(Boolean);
+      state.config.categorias = cats.length ? [...new Set(cats)] : DEFAULT_CATEGORIAS.slice();
+      save(); toast("Categorías actualizadas.", "success");
+    });
     $("#cfgBackup").addEventListener("click", () => descargarTexto(`respaldo_bodega_${addDays(0)}.json`, JSON.stringify(state, null, 2), "application/json"));
     $("#cfgRestore").addEventListener("click", () => $("#restoreFile").click());
     $("#restoreFile").addEventListener("change", (e) => {
@@ -1455,15 +1769,21 @@
           const data = JSON.parse(ev.target.result);
           if (!data.productos || !data.lotes) throw new Error("Formato no válido");
           confirmDialog("¿Reemplazar todos los datos actuales por el respaldo?", () => {
-            state = Object.assign({ productos: [], lotes: [], compras: [], config: { diasPorVencer: 30 } }, data);
-            save(); toast("Respaldo restaurado.", "success"); navigate("dashboard");
+            state = Object.assign({ productos: [], lotes: [], compras: [], ventas: [], config: {} }, data);
+            if (!Array.isArray(state.ventas)) state.ventas = [];
+            state.config = Object.assign({}, DEFAULT_CONFIG, state.config || {});
+            if (!Array.isArray(state.config.categorias) || !state.config.categorias.length) state.config.categorias = DEFAULT_CATEGORIAS.slice();
+            save();
+            document.documentElement.setAttribute("data-theme", state.config.tema || currentTheme());
+            applyBranding();
+            toast("Respaldo restaurado.", "success"); navigate("dashboard");
           }, { danger: true, confirmLabel: "Restaurar" });
         } catch (err) { toast("Archivo inválido: " + err.message, "error"); }
       };
       r.readAsText(file);
     });
     $("#cfgSeed").addEventListener("click", () => confirmDialog("Esto agregará productos y lotes de ejemplo a tus datos actuales. ¿Continuar?", () => { seed(true); save(); toast("Datos de ejemplo cargados.", "success"); navigate("dashboard"); }));
-    $("#cfgWipe").addEventListener("click", () => confirmDialog("¿Borrar <strong>todos</strong> los productos, lotes y compras? Esta acción no se puede deshacer.", () => { state.productos = []; state.lotes = []; state.compras = []; save(); toast("Datos borrados.", "success"); navigate("dashboard"); }, { danger: true, confirmLabel: "Borrar todo" }));
+    $("#cfgWipe").addEventListener("click", () => confirmDialog("¿Borrar <strong>todos</strong> los productos, lotes, compras y ventas? Esta acción no se puede deshacer.", () => { state.productos = []; state.lotes = []; state.compras = []; state.ventas = []; save(); toast("Datos borrados.", "success"); navigate("dashboard"); }, { danger: true, confirmLabel: "Borrar todo" }));
   }
 
   /* ---------------------------------------------------------
@@ -1476,6 +1796,24 @@
     if (currentView === "config") $$("[data-tema]").forEach((b) => b.classList.toggle("active", b.dataset.tema === t));
   }
 
+  const ACCENTS = [
+    { id: "teal", nombre: "Turquesa", color: "#0d9488" },
+    { id: "blue", nombre: "Azul", color: "#2563eb" },
+    { id: "indigo", nombre: "Índigo", color: "#4f46e5" },
+    { id: "green", nombre: "Verde", color: "#059669" },
+    { id: "rose", nombre: "Rosa", color: "#e11d48" },
+    { id: "orange", nombre: "Naranjo", color: "#ea580c" },
+  ];
+  function applyBranding() {
+    document.documentElement.setAttribute("data-accent", state.config.accent || "teal");
+    const brand = document.querySelector(".brand__text strong");
+    if (brand) brand.textContent = state.config.nombreBodega || "Bodega";
+  }
+  function setAccent(id) {
+    state.config.accent = id; save(); applyBranding();
+    if (currentView === "config") $$("[data-accent-swatch]").forEach((s) => s.classList.toggle("active", s.dataset.accentSwatch === id));
+  }
+
   /* ---------------------------------------------------------
      16) RE-RENDER ACTUAL
   --------------------------------------------------------- */
@@ -1485,7 +1823,7 @@
      17) DATOS DE EJEMPLO
   --------------------------------------------------------- */
   function seed(append = false) {
-    if (!append) { state.productos = []; state.lotes = []; state.compras = []; }
+    if (!append) { state.productos = []; state.lotes = []; state.compras = []; state.ventas = []; }
     const compra1 = { id: uid("c"), fecha: addDays(-3), proveedor: "Distribuidora Andina", documento: "F-10234", patente: "KLRT-45", transportista: "Juan Pérez", observacion: "", creado: new Date().toISOString() };
     const compra2 = { id: uid("c"), fecha: addDays(-1), proveedor: "Soprole S.A.", documento: "F-55012", patente: "JHGF-22", transportista: "María Soto", observacion: "", creado: new Date().toISOString() };
     state.compras.push(compra1, compra2);
@@ -1510,7 +1848,7 @@
     ];
 
     defs.forEach((d) => {
-      const prod = { id: uid("p"), nombre: d.nombre, marca: d.marca, categoria: d.categoria, descripcion: "", unidad: d.unidad, codigoBarras: "", precioVenta: d.venta, stockMinimo: d.min, creado: new Date().toISOString() };
+      const prod = { id: uid("p"), nombre: d.nombre, marca: d.marca, categoria: d.categoria, descripcion: "", unidad: d.unidad, proveedorHabitual: (state.compras.find((c) => c.id === (d.lotes[0] || [])[3]) || {}).proveedor || "", codigoBarras: "", precioVenta: d.venta, stockMinimo: d.min, creado: new Date().toISOString() };
       state.productos.push(prod);
       d.lotes.forEach((lt) => {
         const compra = state.compras.find((c) => c.id === lt[3]);
@@ -1520,6 +1858,18 @@
     // un par de mermas de ejemplo
     const algunVencido = state.lotes.find((l) => diasHasta(l.fechaVencimiento) < 0);
     if (algunVencido) { algunVencido.mermado = true; algunVencido.motivoMerma = "Vencido"; }
+
+    // una venta de ejemplo (descuenta por FEFO)
+    try {
+      const pv = state.productos.find((p) => stockVendible(p.id) > 6);
+      if (pv) {
+        const r = descontarFEFO(pv.id, 4);
+        limpiarLotesVacios();
+        state.ventas.push({ id: uid("v"), fecha: addDays(-1), documento: "Boleta 0001",
+          items: [{ productoId: pv.id, nombre: pv.nombre, cantidad: 4, precioVenta: pv.precioVenta, usados: r.usados }],
+          total: 4 * (pv.precioVenta || 0), creado: new Date().toISOString() });
+      }
+    } catch (e) {}
   }
 
   /* ---------------------------------------------------------
@@ -1546,7 +1896,7 @@
     // Búsqueda global → inventario
     const gs = $("#globalSearch");
     gs.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { invFilters = { q: gs.value.trim(), marca: "", estado: "", sort: "venc_asc" }; navigate("inventario"); }
+      if (e.key === "Enter") { invFilters = { q: gs.value.trim(), marca: "", estado: "", proveedor: "", sort: "venc_asc" }; navigate("inventario"); }
     });
 
     // Sidebar móvil
@@ -1568,6 +1918,7 @@
     if (!tema) tema = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     document.documentElement.setAttribute("data-theme", tema);
     state.config.tema = tema;
+    applyBranding();
 
     wireGlobal();
     navigate("dashboard");
